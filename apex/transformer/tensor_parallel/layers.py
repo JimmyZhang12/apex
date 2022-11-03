@@ -18,7 +18,7 @@
 # repo: https://github.com/pytorch/pytorch
 from typing import Optional, Dict, Tuple, List
 import warnings
-
+input_py = input
 import torch
 import torch.nn.functional as F
 import torch.nn.init as init
@@ -289,6 +289,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         async_grad_allreduce: bool,
         sequence_parallel_enabled: bool,
         use_16bit_in_wgrad_accum_fusion: bool = False,
+        debug: bool = False
     ):
         ctx.use_bias = bias is not None and weight.requires_grad
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
@@ -296,7 +297,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         ctx.sequence_parallel_enabled = sequence_parallel_enabled
         ctx.use_16bit_in_wgrad_accum_fusion = use_16bit_in_wgrad_accum_fusion
         ctx.compute_weight_gradient = weight.requires_grad
-
+        ctx.debug = debug
         if ctx.compute_weight_gradient:
             ctx.save_for_backward(input, weight)
         else:
@@ -424,6 +425,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             return sub_grad_input, grad_weight, grad_bias, None, None, None, None
         if ctx.async_grad_allreduce:
             handle.wait()
+        if ctx.debug:
+            print(f"Debug!!! {grad_input.shape}")
         return grad_input, grad_weight, grad_bias, None, None, None, None
 
 
@@ -434,6 +437,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     gradient_accumulation_fusion: bool,
     async_grad_allreduce: bool,
     sequence_parallel_enabled: bool,
+    debug: bool = False
 ) -> torch.Tensor:
     args = _cast_if_autocast_enabled(
         input,
@@ -442,7 +446,8 @@ def linear_with_grad_accumulation_and_async_allreduce(
         gradient_accumulation_fusion,
         async_grad_allreduce,
         sequence_parallel_enabled,
-        False,  # use_16bit_in_wgrad_accum_fusion
+        False,  # use_16bit_in_wgrad_accum_fusion,
+        debug
     )
     with torch.cuda.amp.autocast(enabled=False):
         return LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
@@ -463,7 +468,7 @@ def linear_with_grad_accumulation_and_async_allreduce_in16bit(
         gradient_accumulation_fusion,
         async_grad_allreduce,
         sequence_parallel_enabled,
-        True,  # use_16bit_in_wgrad_accum_fusion
+        True,  # use_16bit_in_wgrad_accum_fusion,
     )
     with torch.cuda.amp.autocast(enabled=False):
         return LinearWithGradAccumulationAndAsyncCommunication.apply(*args)
@@ -522,9 +527,10 @@ class ColumnParallelLinear(torch.nn.Module):
         gradient_accumulation_fusion=False,
         accumulation_in_fp16: bool = False,
         sequence_parallel_enabled: bool = False,
+        debug: bool = False
     ):
         super().__init__()
-
+        self.debug = debug
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
@@ -634,6 +640,9 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             input_parallel = copy_to_tensor_model_parallel_region(input_)
 
+        if self.debug:
+            print(f"ColumnParallelLinear: {input_.shape} {input_}")
+
         # Matrix multiply.
         output_parallel = self._forward_impl(
             input=input_parallel,
@@ -642,6 +651,7 @@ class ColumnParallelLinear(torch.nn.Module):
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             async_grad_allreduce=self.async_tensor_model_parallel_allreduce,
             sequence_parallel_enabled=self.sequence_parallel_enabled,
+            debug=self.debug
         )
         if self.gather_output:
             # All-gather across the partitions.
